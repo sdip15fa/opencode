@@ -90,12 +90,29 @@ export type EventFileEdited = {
   }
 }
 
+export type OutputFormatText = {
+  type: "text"
+}
+
+export type JsonSchema = {
+  [key: string]: unknown
+}
+
+export type OutputFormatJsonSchema = {
+  type: "json_schema"
+  schema: JsonSchema
+  retryCount?: number
+}
+
+export type OutputFormat = OutputFormatText | OutputFormatJsonSchema
+
 export type FileDiff = {
   file: string
   before: string
   after: string
   additions: number
   deletions: number
+  status?: "added" | "deleted" | "modified"
 }
 
 export type UserMessage = {
@@ -105,6 +122,7 @@ export type UserMessage = {
   time: {
     created: number
   }
+  format?: OutputFormat
   summary?: {
     title?: string
     body?: string
@@ -120,6 +138,10 @@ export type UserMessage = {
     [key: string]: boolean
   }
   variant?: string
+  /**
+   * Render this user message with assistant styling in the UI
+   */
+  renderAsAssistant?: boolean
 }
 
 export type ProviderAuthError = {
@@ -151,6 +173,22 @@ export type MessageAbortedError = {
   }
 }
 
+export type StructuredOutputError = {
+  name: "StructuredOutputError"
+  data: {
+    message: string
+    retries: number
+  }
+}
+
+export type ContextOverflowError = {
+  name: "ContextOverflowError"
+  data: {
+    message: string
+    responseBody?: string
+  }
+}
+
 export type ApiError = {
   name: "APIError"
   data: {
@@ -175,7 +213,14 @@ export type AssistantMessage = {
     created: number
     completed?: number
   }
-  error?: ProviderAuthError | UnknownError | MessageOutputLengthError | MessageAbortedError | ApiError
+  error?:
+    | ProviderAuthError
+    | UnknownError
+    | MessageOutputLengthError
+    | MessageAbortedError
+    | StructuredOutputError
+    | ContextOverflowError
+    | ApiError
   parentID: string
   modelID: string
   providerID: string
@@ -188,6 +233,7 @@ export type AssistantMessage = {
   summary?: boolean
   cost: number
   tokens: {
+    total?: number
     input: number
     output: number
     reasoning: number
@@ -196,6 +242,8 @@ export type AssistantMessage = {
       write: number
     }
   }
+  structured?: unknown
+  variant?: string
   finish?: string
 }
 
@@ -402,6 +450,7 @@ export type StepFinishPart = {
   snapshot?: string
   cost: number
   tokens: {
+    total?: number
     input: number
     output: number
     reasoning: number
@@ -818,7 +867,14 @@ export type EventSessionError = {
   type: "session.error"
   properties: {
     sessionID?: string
-    error?: ProviderAuthError | UnknownError | MessageOutputLengthError | MessageAbortedError | ApiError
+    error?:
+      | ProviderAuthError
+      | UnknownError
+      | MessageOutputLengthError
+      | MessageAbortedError
+      | StructuredOutputError
+      | ContextOverflowError
+      | ApiError
   }
 }
 
@@ -1308,6 +1364,10 @@ export type KeybindsConfig = {
    * Toggle tips on home screen
    */
   tips_toggle?: string
+  /**
+   * Toggle thinking blocks visibility
+   */
+  display_thinking?: string
 }
 
 /**
@@ -1331,6 +1391,10 @@ export type ServerConfig = {
    * Enable mDNS service discovery
    */
   mdns?: boolean
+  /**
+   * Custom domain name for mDNS service (default: opencode.local)
+   */
+  mdnsDomain?: string
   /**
    * Additional domains to allow for CORS
    */
@@ -1371,6 +1435,10 @@ export type PermissionConfig =
 
 export type AgentConfig = {
   model?: string
+  /**
+   * Default model variant for this agent (applies only when using the agent's configured model).
+   */
+  variant?: string
   temperature?: number
   top_p?: number
   prompt?: string
@@ -1394,9 +1462,9 @@ export type AgentConfig = {
     [key: string]: unknown
   }
   /**
-   * Hex color code for the agent (e.g., #FF5733)
+   * Hex color code (e.g., #FF5733) or theme color (e.g., primary)
    */
-  color?: string
+  color?: string | "primary" | "secondary" | "accent" | "success" | "warning" | "error" | "info"
   /**
    * Maximum number of agentic iterations before forcing text-only response
    */
@@ -1421,6 +1489,13 @@ export type AgentConfig = {
         [key: string]: unknown
       }
     | string
+    | "primary"
+    | "secondary"
+    | "accent"
+    | "success"
+    | "warning"
+    | "error"
+    | "info"
     | number
     | PermissionConfig
     | undefined
@@ -1477,7 +1552,8 @@ export type ProviderConfig = {
         [key: string]: string
       }
       provider?: {
-        npm: string
+        npm?: string
+        api?: string
       }
       /**
        * Variant-specific configuration
@@ -1642,6 +1718,10 @@ export type Config = {
      * Additional paths to skill folders
      */
     paths?: Array<string>
+    /**
+     * URLs to fetch skills from (e.g., https://example.com/.well-known/skills/)
+     */
+    urls?: Array<string>
   }
   watcher?: {
     ignore?: Array<string>
@@ -1777,28 +1857,12 @@ export type Config = {
      * Enable pruning of old tool outputs (default: true)
      */
     prune?: boolean
+    /**
+     * Token buffer for compaction. Leaves enough window to avoid overflow during compaction.
+     */
+    reserved?: number
   }
   experimental?: {
-    hook?: {
-      file_edited?: {
-        [key: string]: Array<{
-          command: Array<string>
-          environment?: {
-            [key: string]: string
-          }
-        }>
-      }
-      session_completed?: Array<{
-        command: Array<string>
-        environment?: {
-          [key: string]: string
-        }
-      }>
-    }
-    /**
-     * Number of retries for chat completions on failure
-     */
-    chatMaxRetries?: number
     disable_paste_summary?: boolean
     /**
      * Enable the batch tool
@@ -2062,7 +2126,7 @@ export type FileNode = {
 }
 
 export type FileContent = {
-  type: "text"
+  type: "text" | "binary"
   content: string
   diff?: string
   patch?: {
@@ -2136,7 +2200,7 @@ export type Command = {
   description?: string
   agent?: string
   model?: string
-  mcp?: boolean
+  source?: "command" | "mcp" | "skill"
   template: string
   subtask?: boolean
   hints: Array<string>
@@ -2156,6 +2220,7 @@ export type Agent = {
     modelID: string
     providerID: string
   }
+  variant?: string
   prompt?: string
   options: {
     [key: string]: unknown
@@ -3370,9 +3435,14 @@ export type SessionPromptData = {
     tools?: {
       [key: string]: boolean
     }
+    format?: OutputFormat
     system?: string
     variant?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
+    /**
+     * Render this user message with assistant styling in the UI
+     */
+    renderAsAssistant?: boolean
   }
   path: {
     /**
@@ -3557,9 +3627,14 @@ export type SessionPromptAsyncData = {
     tools?: {
       [key: string]: boolean
     }
+    format?: OutputFormat
     system?: string
     variant?: string
     parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
+    /**
+     * Render this user message with assistant styling in the UI
+     */
+    renderAsAssistant?: boolean
   }
   path: {
     /**
@@ -4005,7 +4080,8 @@ export type ProviderListResponses = {
             [key: string]: string
           }
           provider?: {
-            npm: string
+            npm?: string
+            api?: string
           }
           variants?: {
             [key: string]: {
@@ -4933,6 +5009,7 @@ export type AppSkillsResponses = {
     name: string
     description: string
     location: string
+    content: string
   }>
 }
 

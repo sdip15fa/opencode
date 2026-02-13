@@ -16,7 +16,8 @@ import path from "path"
 import { useRoute, useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { SplitBorder } from "@tui/component/border"
-import { useTheme } from "@tui/context/theme"
+import { Spinner } from "@tui/component/spinner"
+import { selectedForeground, useTheme } from "@tui/context/theme"
 import {
   BoxRenderable,
   ScrollBoxRenderable,
@@ -43,6 +44,7 @@ import type { ApplyPatchTool } from "@/tool/apply_patch"
 import type { WebFetchTool } from "@/tool/webfetch"
 import type { TaskTool } from "@/tool/task"
 import type { QuestionTool } from "@/tool/question"
+import type { SkillTool } from "@/tool/skill"
 import { useKeyboard, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "@tui/context/sdk"
 import { useCommandDialog } from "@tui/component/dialog-command"
@@ -75,6 +77,7 @@ import { PermissionPrompt } from "./permission"
 import { QuestionPrompt } from "./question"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
 import { formatTranscript } from "../../util/transcript"
+import { UI } from "@/cli/ui.ts"
 
 addDefaultParsers(parsers.parsers)
 
@@ -138,7 +141,7 @@ export function Session() {
   })
 
   const dimensions = useTerminalDimensions()
-  const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "hide")
+  const [sidebar, setSidebar] = kv.signal<"auto" | "hide">("sidebar", "auto")
   const [sidebarOpen, setSidebarOpen] = createSignal(false)
   const [conceal, setConceal] = createSignal(true)
   const [showThinking, setShowThinking] = kv.signal("thinking_visibility", true)
@@ -146,6 +149,7 @@ export function Session() {
   const [showDetails, setShowDetails] = kv.signal("tool_details_visibility", true)
   const [showAssistantMetadata, setShowAssistantMetadata] = kv.signal("assistant_metadata_visibility", true)
   const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_visible", false)
+  const [showHeader, setShowHeader] = kv.signal("header_visible", true)
   const [diffWrapMode] = kv.signal<"word" | "none">("diff_wrap_mode", "word")
   const [animationsEnabled, setAnimationsEnabled] = kv.signal("animations_enabled", true)
 
@@ -220,6 +224,19 @@ export function Session() {
 
   // Allow exit when in child session (prompt is hidden)
   const exit = useExit()
+
+  createEffect(() => {
+    const title = Locale.truncate(session()?.title ?? "", 50)
+    return exit.message.set(
+      [
+        ``,
+        `  █▀▀█  ${UI.Style.TEXT_DIM}${title}${UI.Style.TEXT_NORMAL}`,
+        `  █  █  ${UI.Style.TEXT_DIM}opencode -s ${session()?.id}${UI.Style.TEXT_NORMAL}`,
+        `  ▀▀▀▀  `,
+      ].join("\n"),
+    )
+  })
+
   useKeyboard((evt) => {
     if (!session()?.parentID) return
     if (keybind.match("app_exit", evt)) {
@@ -298,26 +315,31 @@ export function Session() {
   const command = useCommandDialog()
   command.register(() => [
     {
-      title: "Share session",
+      title: session()?.share?.url ? "Copy share link" : "Share session",
       value: "session.share",
       suggested: route.type === "session",
       keybind: "session_share",
       category: "Session",
-      enabled: sync.data.config.share !== "disabled" && !session()?.share?.url,
+      enabled: sync.data.config.share !== "disabled",
       slash: {
         name: "share",
       },
       onSelect: async (dialog) => {
+        const copy = (url: string) =>
+          Clipboard.copy(url)
+            .then(() => toast.show({ message: "Share URL copied to clipboard!", variant: "success" }))
+            .catch(() => toast.show({ message: "Failed to copy URL to clipboard", variant: "error" }))
+        const url = session()?.share?.url
+        if (url) {
+          await copy(url)
+          dialog.clear()
+          return
+        }
         await sdk.client.session
           .share({
             sessionID: route.sessionID,
           })
-          .then((res) =>
-            Clipboard.copy(res.data!.share!.url).catch(() =>
-              toast.show({ message: "Failed to copy URL to clipboard", variant: "error" }),
-            ),
-          )
-          .then(() => toast.show({ message: "Share URL copied to clipboard!", variant: "success" }))
+          .then((res) => copy(res.data!.share!.url))
           .catch(() => toast.show({ message: "Failed to share session", variant: "error" }))
         dialog.clear()
       },
@@ -530,6 +552,7 @@ export function Session() {
     {
       title: showThinking() ? "Hide thinking" : "Show thinking",
       value: "session.toggle.thinking",
+      keybind: "display_thinking",
       category: "Session",
       slash: {
         name: "thinking",
@@ -557,6 +580,15 @@ export function Session() {
       category: "Session",
       onSelect: (dialog) => {
         setShowScrollbar((prev) => !prev)
+        dialog.clear()
+      },
+    },
+    {
+      title: showHeader() ? "Hide header" : "Show header",
+      value: "session.toggle.header",
+      category: "Session",
+      onSelect: (dialog) => {
+        setShowHeader((prev) => !prev)
         dialog.clear()
       },
     },
@@ -941,7 +973,7 @@ export function Session() {
       <box flexDirection="row">
         <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
           <Show when={session()}>
-            <Show when={!sidebarVisible() || !wide()}>
+            <Show when={showHeader() && (!sidebarVisible() || !wide())}>
               <Header />
             </Show>
             <scrollbox
@@ -1029,7 +1061,7 @@ export function Session() {
                     <Match when={revert()?.messageID && message.id >= revert()!.messageID}>
                       <></>
                     </Match>
-                    <Match when={message.role === "user"}>
+                    <Match when={message.role === "user" && !(message as UserMessage).renderAsAssistant}>
                       <UserMessage
                         index={index()}
                         onMouseUp={() => {
@@ -1047,10 +1079,15 @@ export function Session() {
                         pending={pending()}
                       />
                     </Match>
-                    <Match when={message.role === "assistant"}>
+                    <Match
+                      when={
+                        message.role === "assistant" ||
+                        (message.role === "user" && (message as UserMessage).renderAsAssistant)
+                      }
+                    >
                       <AssistantMessage
                         last={lastAssistant()?.id === message.id}
-                        message={message as AssistantMessage}
+                        message={message}
                         parts={sync.data.part[message.id] ?? []}
                       />
                     </Match>
@@ -1135,7 +1172,8 @@ function UserMessage(props: {
   const { theme } = useTheme()
   const [hover, setHover] = createSignal(false)
   const queued = createMemo(() => props.pending && props.message.id > props.pending)
-  const color = createMemo(() => (queued() ? theme.accent : local.agent.color(props.message.agent)))
+  const color = createMemo(() => local.agent.color(props.message.agent))
+  const queuedFg = createMemo(() => selectedForeground(theme, color()))
   const metadataVisible = createMemo(() => queued() || ctx.showTimestamps())
 
   const compaction = createMemo(() => props.parts.find((x) => x.type === "compaction"))
@@ -1197,7 +1235,7 @@ function UserMessage(props: {
               }
             >
               <text fg={theme.textMuted}>
-                <span style={{ bg: theme.accent, fg: theme.backgroundPanel, bold: true }}> QUEUED </span>
+                <span style={{ bg: color(), fg: queuedFg(), bold: true }}> QUEUED </span>
               </text>
             </Show>
           </box>
@@ -1216,22 +1254,29 @@ function UserMessage(props: {
   )
 }
 
-function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; last: boolean }) {
+function AssistantMessage(props: { message: AssistantMessage | UserMessage; parts: Part[]; last: boolean }) {
   const local = useLocal()
   const { theme } = useTheme()
   const sync = useSync()
   const messages = createMemo(() => sync.data.message[props.message.sessionID] ?? [])
 
+  // Check if this is an actual AssistantMessage (not UserMessage with renderAsAssistant)
+  const isActualAssistant = createMemo(() => props.message.role === "assistant")
+
   const final = createMemo(() => {
-    return props.message.finish && !["tool-calls", "unknown"].includes(props.message.finish)
+    if (!isActualAssistant()) return false
+    const msg = props.message as AssistantMessage
+    return msg.finish && !["tool-calls", "unknown"].includes(msg.finish)
   })
 
   const duration = createMemo(() => {
+    if (!isActualAssistant()) return 0
     if (!final()) return 0
-    if (!props.message.time.completed) return 0
-    const user = messages().find((x) => x.role === "user" && x.id === props.message.parentID)
+    const msg = props.message as AssistantMessage
+    if (!msg.time.completed) return 0
+    const user = messages().find((x) => x.role === "user" && x.id === msg.parentID)
     if (!user || !user.time) return 0
-    return props.message.time.completed - user.time.created
+    return msg.time.completed - user.time.created
   })
 
   return (
@@ -1251,46 +1296,55 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
           )
         }}
       </For>
-      <Show when={props.message.error && props.message.error.name !== "MessageAbortedError"}>
-        <box
-          border={["left"]}
-          paddingTop={1}
-          paddingBottom={1}
-          paddingLeft={2}
-          marginTop={1}
-          backgroundColor={theme.backgroundPanel}
-          customBorderChars={SplitBorder.customBorderChars}
-          borderColor={theme.error}
+      <Show when={isActualAssistant()}>
+        <Show
+          when={
+            (props.message as AssistantMessage).error &&
+            (props.message as AssistantMessage).error?.name !== "MessageAbortedError"
+          }
         >
-          <text fg={theme.textMuted}>{props.message.error?.data.message}</text>
-        </box>
-      </Show>
-      <Switch>
-        <Match when={props.last || final() || props.message.error?.name === "MessageAbortedError"}>
-          <box paddingLeft={3}>
-            <text marginTop={1}>
-              <span
-                style={{
-                  fg:
-                    props.message.error?.name === "MessageAbortedError"
-                      ? theme.textMuted
-                      : local.agent.color(props.message.agent),
-                }}
-              >
-                ▣{" "}
-              </span>{" "}
-              <span style={{ fg: theme.text }}>{Locale.titlecase(props.message.mode)}</span>
-              <span style={{ fg: theme.textMuted }}> · {props.message.modelID}</span>
-              <Show when={duration()}>
-                <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
-              </Show>
-              <Show when={props.message.error?.name === "MessageAbortedError"}>
-                <span style={{ fg: theme.textMuted }}> · interrupted</span>
-              </Show>
-            </text>
+          <box
+            border={["left"]}
+            paddingTop={1}
+            paddingBottom={1}
+            paddingLeft={2}
+            marginTop={1}
+            backgroundColor={theme.backgroundPanel}
+            customBorderChars={SplitBorder.customBorderChars}
+            borderColor={theme.error}
+          >
+            <text fg={theme.textMuted}>{(props.message as AssistantMessage).error?.data.message}</text>
           </box>
-        </Match>
-      </Switch>
+        </Show>
+        <Switch>
+          <Match
+            when={props.last || final() || (props.message as AssistantMessage).error?.name === "MessageAbortedError"}
+          >
+            <box paddingLeft={3}>
+              <text marginTop={1}>
+                <span
+                  style={{
+                    fg:
+                      (props.message as AssistantMessage).error?.name === "MessageAbortedError"
+                        ? theme.textMuted
+                        : local.agent.color(props.message.agent),
+                  }}
+                >
+                  ▣{" "}
+                </span>{" "}
+                <span style={{ fg: theme.text }}>{Locale.titlecase((props.message as AssistantMessage).mode)}</span>
+                <span style={{ fg: theme.textMuted }}>· {(props.message as AssistantMessage).modelID}</span>
+                <Show when={duration()}>
+                  <span style={{ fg: theme.textMuted }}>· {Locale.duration(duration())}</span>
+                </Show>
+                <Show when={(props.message as AssistantMessage).error?.name === "MessageAbortedError"}>
+                  <span style={{ fg: theme.textMuted }}>· interrupted</span>
+                </Show>
+              </text>
+            </box>
+          </Match>
+        </Switch>
+      </Show>
     </>
   )
 }
@@ -1301,7 +1355,7 @@ const PART_MAPPING = {
   reasoning: ReasoningPart,
 }
 
-function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
+function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage | UserMessage }) {
   const { theme, subtleSyntax } = useTheme()
   const ctx = use()
   const content = createMemo(() => {
@@ -1334,7 +1388,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
   )
 }
 
-function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage }) {
+function TextPart(props: { last: boolean; part: TextPart; message: AssistantMessage | UserMessage }) {
   const ctx = use()
   const { theme, syntax } = useTheme()
   return (
@@ -1368,7 +1422,7 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
 
 // Pending messages moved to individual tool pending functions
 
-function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMessage }) {
+function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMessage | UserMessage }) {
   const ctx = use()
   const sync = useSync()
 
@@ -1446,6 +1500,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         </Match>
         <Match when={props.part.tool === "question"}>
           <Question {...toolprops} />
+        </Match>
+        <Match when={props.part.tool === "skill"}>
+          <Skill {...toolprops} />
         </Match>
         <Match when={true}>
           <GenericTool {...toolprops} />
@@ -1555,7 +1612,13 @@ function InlineTool(props: {
   )
 }
 
-function BlockTool(props: { title: string; children: JSX.Element; onClick?: () => void; part?: ToolPart }) {
+function BlockTool(props: {
+  title: string
+  children: JSX.Element
+  onClick?: () => void
+  part?: ToolPart
+  spinner?: boolean
+}) {
   const { theme } = useTheme()
   const renderer = useRenderer()
   const [hover, setHover] = createSignal(false)
@@ -1578,9 +1641,16 @@ function BlockTool(props: { title: string; children: JSX.Element; onClick?: () =
         props.onClick?.()
       }}
     >
-      <text paddingLeft={3} fg={theme.textMuted}>
-        {props.title}
-      </text>
+      <Show
+        when={props.spinner}
+        fallback={
+          <text paddingLeft={3} fg={theme.textMuted}>
+            {props.title}
+          </text>
+        }
+      >
+        <Spinner color={theme.textMuted}>{props.title.replace(/^# /, "")}</Spinner>
+      </Show>
       {props.children}
       <Show when={error()}>
         <text fg={theme.error}>{error()}</text>
@@ -1592,6 +1662,7 @@ function BlockTool(props: { title: string; children: JSX.Element; onClick?: () =
 function Bash(props: ToolProps<typeof BashTool>) {
   const { theme } = useTheme()
   const sync = useSync()
+  const isRunning = createMemo(() => props.part.state.status === "running")
   const output = createMemo(() => stripAnsi(props.metadata.output?.trim() ?? ""))
   const [expanded, setExpanded] = createSignal(false)
   const lines = createMemo(() => output().split("\n"))
@@ -1632,11 +1703,14 @@ function Bash(props: ToolProps<typeof BashTool>) {
         <BlockTool
           title={title()}
           part={props.part}
+          spinner={isRunning()}
           onClick={overflow() ? () => setExpanded((prev) => !prev) : undefined}
         >
           <box gap={1}>
             <text fg={theme.text}>$ {props.input.command}</text>
-            <text fg={theme.text}>{limited()}</text>
+            <Show when={output()}>
+              <text fg={theme.text}>{limited()}</text>
+            </Show>
             <Show when={overflow()}>
               <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
             </Show>
@@ -1701,7 +1775,9 @@ function Glob(props: ToolProps<typeof GlobTool>) {
   return (
     <InlineTool icon="✱" pending="Finding files..." complete={props.input.pattern} part={props.part}>
       Glob "{props.input.pattern}" <Show when={props.input.path}>in {normalizePath(props.input.path)} </Show>
-      <Show when={props.metadata.count}>({props.metadata.count} matches)</Show>
+      <Show when={props.metadata.count}>
+        ({props.metadata.count} {props.metadata.count === 1 ? "match" : "matches"})
+      </Show>
     </InlineTool>
   )
 }
@@ -1737,7 +1813,9 @@ function Grep(props: ToolProps<typeof GrepTool>) {
   return (
     <InlineTool icon="✱" pending="Searching content..." complete={props.input.pattern} part={props.part}>
       Grep "{props.input.pattern}" <Show when={props.input.path}>in {normalizePath(props.input.path)} </Show>
-      <Show when={props.metadata.matches}>({props.metadata.matches} matches)</Show>
+      <Show when={props.metadata.matches}>
+        ({props.metadata.matches} {props.metadata.matches === 1 ? "match" : "matches"})
+      </Show>
     </InlineTool>
   )
 }
@@ -1789,13 +1867,25 @@ function Task(props: ToolProps<typeof TaskTool>) {
   const keybind = useKeybind()
   const { navigate } = useRoute()
   const local = useLocal()
+  const sync = useSync()
 
-  const current = createMemo(() => props.metadata.summary?.findLast((x) => x.state.status !== "pending"))
-  const color = createMemo(() => local.agent.color(props.input.subagent_type ?? "unknown"))
+  const tools = createMemo(() => {
+    const sessionID = props.metadata.sessionId
+    const msgs = sync.data.message[sessionID ?? ""] ?? []
+    return msgs.flatMap((msg) =>
+      (sync.data.part[msg.id] ?? [])
+        .filter((part): part is ToolPart => part.type === "tool")
+        .map((part) => ({ tool: part.tool, state: part.state })),
+    )
+  })
+
+  const current = createMemo(() => tools().findLast((x) => x.state.status !== "pending"))
+
+  const isRunning = createMemo(() => props.part.state.status === "running")
 
   return (
     <Switch>
-      <Match when={props.metadata.summary?.length}>
+      <Match when={props.input.description || props.input.subagent_type}>
         <BlockTool
           title={"# " + Locale.titlecase(props.input.subagent_type ?? "unknown") + " Task"}
           onClick={
@@ -1804,34 +1894,34 @@ function Task(props: ToolProps<typeof TaskTool>) {
               : undefined
           }
           part={props.part}
+          spinner={isRunning()}
         >
           <box>
             <text style={{ fg: theme.textMuted }}>
-              {props.input.description} ({props.metadata.summary?.length} toolcalls)
+              {props.input.description} ({tools().length} toolcalls)
             </text>
             <Show when={current()}>
-              <text style={{ fg: current()!.state.status === "error" ? theme.error : theme.textMuted }}>
-                └ {Locale.titlecase(current()!.tool)}{" "}
-                {current()!.state.status === "completed" ? current()!.state.title : ""}
-              </text>
+              {(item) => {
+                const title = item().state.status === "completed" ? (item().state as any).title : ""
+                return (
+                  <text style={{ fg: item().state.status === "error" ? theme.error : theme.textMuted }}>
+                    └ {Locale.titlecase(item().tool)} {title}
+                  </text>
+                )
+              }}
             </Show>
           </box>
-          <text fg={theme.text}>
-            {keybind.print("session_child_cycle")}
-            <span style={{ fg: theme.textMuted }}> view subagents</span>
-          </text>
+          <Show when={props.metadata.sessionId}>
+            <text fg={theme.text}>
+              {keybind.print("session_child_cycle")}
+              <span style={{ fg: theme.textMuted }}> view subagents</span>
+            </text>
+          </Show>
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool
-          icon="◉"
-          iconColor={color()}
-          pending="Delegating..."
-          complete={props.input.subagent_type ?? props.input.description}
-          part={props.part}
-        >
-          <span style={{ fg: theme.text }}>{Locale.titlecase(props.input.subagent_type ?? "unknown")}</span> Task "
-          {props.input.description}"
+        <InlineTool icon="#" pending="Delegating..." complete={props.input.subagent_type} part={props.part}>
+          {props.input.subagent_type} Task {props.input.description}
         </InlineTool>
       </Match>
     </Switch>
@@ -2033,6 +2123,14 @@ function Question(props: ToolProps<typeof QuestionTool>) {
         </InlineTool>
       </Match>
     </Switch>
+  )
+}
+
+function Skill(props: ToolProps<typeof SkillTool>) {
+  return (
+    <InlineTool icon="→" pending="Loading skill..." complete={props.input.name} part={props.part}>
+      Skill "{props.input.name}"
+    </InlineTool>
   )
 }
 
